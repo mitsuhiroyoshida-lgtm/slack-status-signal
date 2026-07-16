@@ -21,7 +21,13 @@ const {
 } = process.env;
 
 const INITIAL_ALLOW_LIST = ALLOWED_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
-store.seedAllowListIfEmpty(INITIAL_ALLOW_LIST);
+(async () => {
+  try {
+    await store.seedAllowListIfEmpty(INITIAL_ALLOW_LIST);
+  } catch (err) {
+    console.error('許可リストの初期化に失敗:', err.message);
+  }
+})();
 
 const app = express();
 
@@ -71,7 +77,8 @@ async function isHolidayTodayJST() {
 }
 
 async function isActiveNow() {
-  if (!store.getEnabled()) return false;
+  const enabled = await store.getEnabled();
+  if (!enabled) return false;
   if (!isWithinActivePeriod()) return false;
   if (SKIP_WEEKENDS_AND_HOLIDAYS === 'true') {
     if (isWeekendJST()) return false;
@@ -81,7 +88,7 @@ async function isActiveNow() {
 }
 
 async function sendInviteViaSlackDM(email, inviteUrl) {
-  const botToken = store.getBotToken();
+  const botToken = await store.getBotToken();
   if (!botToken) {
     return { sent: false, reason: 'botトークン未登録です。まず /slack/oauth/start から誰か1人が登録してください。' };
   }
@@ -145,8 +152,9 @@ app.get('/slack/oauth/callback', async (req, res) => {
       return res.status(400).send(`Slack認可エラー: ${data.error}`);
     }
 
-    if (data.access_token && !store.getBotToken()) {
-      store.setBotToken(data.access_token);
+    const existingBotToken = await store.getBotToken();
+    if (data.access_token && !existingBotToken) {
+      await store.setBotToken(data.access_token);
     }
 
     const userId = data.authed_user && data.authed_user.id;
@@ -156,9 +164,9 @@ app.get('/slack/oauth/callback', async (req, res) => {
       return res.status(400).send('ユーザートークンの取得に失敗しました');
     }
 
-    const allowList = store.getAllowList();
+    const allowList = await store.getAllowList();
     if (allowList.length > 0) {
-      const botToken = store.getBotToken();
+      const botToken = await store.getBotToken();
       const botClient = new WebClient(botToken);
       const info = await botClient.users.info({ user: userId });
       const email = info.user && info.user.profile && info.user.profile.email;
@@ -167,10 +175,10 @@ app.get('/slack/oauth/callback', async (req, res) => {
           .status(403)
           .send('<h2>登録できませんでした</h2><p>このBotは指定されたメンバーのみ利用できます。心当たりがない場合は管理者にご確認ください。</p>');
       }
-      store.upsertUser(userId, { email });
+      await store.upsertUser(userId, { email });
     }
 
-    store.upsertUser(userId, { userToken });
+    await store.upsertUser(userId, { userToken });
     return res.send(
       '<h2>登録が完了しました 🎉</h2><p>Botが稼働中の期間、平日の10時・17時にDMが届きます。ボタンを押すとあなたのSlackステータスが自動で切り替わります。このタブは閉じて大丈夫です。</p>'
     );
@@ -181,13 +189,13 @@ app.get('/slack/oauth/callback', async (req, res) => {
 });
 
 async function sendCheckinToAll(timeLabel) {
-  const botToken = store.getBotToken();
+  const botToken = await store.getBotToken();
   if (!botToken) {
     console.warn('botトークン未登録。誰か1人がまず /slack/oauth/start から登録してください。');
     return;
   }
   const client = new WebClient(botToken);
-  const users = store.getAllUsers();
+  const users = await store.getAllUsers();
 
   for (const user of users) {
     try {
@@ -240,7 +248,7 @@ app.get('/trigger', async (req, res) => {
 
   const active = await isActiveNow();
   if (!active) {
-    console.log(`スキップ: enabled=${store.getEnabled()} / 期間内=${isWithinActivePeriod()} / 土日祝スキップ設定=${SKIP_WEEKENDS_AND_HOLIDAYS}`);
+    console.log(`スキップ: 期間内=${isWithinActivePeriod()} / 土日祝スキップ設定=${SKIP_WEEKENDS_AND_HOLIDAYS}`);
     return res.send('skipped (Botは現在停止中、起動期間外、または土日祝日です)');
   }
 
@@ -262,26 +270,27 @@ if (ENABLE_INTERNAL_CRON === 'true') {
   );
 }
 
-app.get('/admin/on', (req, res) => {
+app.get('/admin/on', async (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
-  store.setEnabled(true);
+  await store.setEnabled(true);
   res.send('<h2>Botを起動しました ▶️</h2><p>次回の10時/17時のチェックインからDMが届きます（起動期間・土日祝日の設定がある場合はその範囲内に限ります）。</p>');
 });
 
-app.get('/admin/off', (req, res) => {
+app.get('/admin/off', async (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
-  store.setEnabled(false);
+  await store.setEnabled(false);
   res.send('<h2>Botを停止しました ⏸️</h2><p>再開するまでDMは送信されません。</p>');
 });
 
 app.get('/admin/status', async (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
+  const enabled = await store.getEnabled();
   const weekend = isWeekendJST();
   const holiday = SKIP_WEEKENDS_AND_HOLIDAYS === 'true' ? await isHolidayTodayJST() : false;
   const active = await isActiveNow();
   res.send(
     `<h2>現在の状態</h2>` +
-      `<p>手動ON/OFF: ${store.getEnabled() ? 'ON' : 'OFF'}</p>` +
+      `<p>手動ON/OFF: ${enabled ? 'ON' : 'OFF'}</p>` +
       `<p>起動期間: ${BOT_START_DATE || '(指定なし)'} 〜 ${BOT_END_DATE || '(指定なし)'}</p>` +
       `<p>土日祝スキップ設定: ${SKIP_WEEKENDS_AND_HOLIDAYS === 'true' ? '有効' : '無効'}</p>` +
       `<p>今日(JST): ${todayJST()} / 土日: ${weekend ? 'はい' : 'いいえ'} / 祝日: ${holiday ? 'はい' : 'いいえ'}</p>` +
@@ -290,9 +299,7 @@ app.get('/admin/status', async (req, res) => {
   );
 });
 
-function renderMembersPage(notice, noticeDetail) {
-  const allowList = store.getAllowList();
-  const users = store.getAllUsers();
+function renderMembersPage(allowList, users, notice, noticeDetail) {
   const registeredEmails = new Set(users.map((u) => (u.email || '').toLowerCase()));
 
   const rows = allowList
@@ -336,9 +343,11 @@ function renderMembersPage(notice, noticeDetail) {
   `;
 }
 
-app.get('/admin/members', (req, res) => {
+app.get('/admin/members', async (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
-  res.send(renderMembersPage(req.query.notice, req.query.detail));
+  const allowList = await store.getAllowList();
+  const users = await store.getAllUsers();
+  res.send(renderMembersPage(allowList, users, req.query.notice, req.query.detail));
 });
 
 app.get('/admin/add-member', async (req, res) => {
@@ -346,7 +355,7 @@ app.get('/admin/add-member', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).send('email がありません');
 
-  const normalized = store.addAllowedEmail(email);
+  const normalized = await store.addAllowedEmail(email);
   const inviteUrl = `${BASE_URL}/slack/oauth/start`;
 
   const result = await sendInviteViaSlackDM(normalized, inviteUrl);
@@ -356,11 +365,11 @@ app.get('/admin/add-member', async (req, res) => {
   res.redirect(`/admin/members?secret=${TRIGGER_SECRET}&notice=${notice}${detailParam}`);
 });
 
-app.get('/admin/remove-member', (req, res) => {
+app.get('/admin/remove-member', async (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
   const { email } = req.query;
   if (!email) return res.status(400).send('email がありません');
-  store.removeAllowedEmail(email);
+  await store.removeAllowedEmail(email);
   res.redirect(`/admin/members?secret=${TRIGGER_SECRET}`);
 });
 
@@ -396,7 +405,7 @@ app.post('/slack/interactions', async (req, res) => {
   const key = action.value;
   const signal = SIGNALS[key];
   const userId = payload.user.id;
-  const user = store.getUser(userId);
+  const user = await store.getUser(userId);
 
   if (!signal || !user || !user.userToken) {
     console.warn(`未登録ユーザーからの操作、または不正な値: ${userId}`);
