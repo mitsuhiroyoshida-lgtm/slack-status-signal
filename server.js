@@ -15,29 +15,24 @@ const {
   PORT = 3000,
   ENABLE_INTERNAL_CRON,
   ALLOWED_EMAILS = '',
-  BOT_START_DATE = '', // 例: 2026-07-01（Asia/Tokyo基準）。空なら開始日の制限なし
-  BOT_END_DATE = '',   // 例: 2026-07-31（この日を含む）。空なら終了日の制限なし
+  BOT_START_DATE = '',
+  BOT_END_DATE = '',
 } = process.env;
 
 const ALLOW_LIST = ALLOWED_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 
 const app = express();
 
-// ------- ステータスの選択肢（ここを増減・変更すればOK） -------
 const SIGNALS = {
   blue: { emoji: ':large_blue_circle:', label: '青（順調）', text: '順調に対応中' },
   yellow: { emoji: ':large_yellow_circle:', label: '黄（やや負荷あり）', text: 'やや負荷あり・急ぎは調整希望' },
   red: { emoji: ':red_circle:', label: '赤（高負荷）', text: '高負荷・緊急以外は後ほど対応' },
 };
 
-// ===================== 0. 起動期間・ON/OFF判定 =====================
-
-// 今日の日付（Asia/Tokyo, YYYY-MM-DD）
 function todayJST() {
   return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
 }
 
-// BOT_START_DATE〜BOT_END_DATEの期間内かどうか（両方空なら常にtrue）
 function isWithinActivePeriod() {
   const today = todayJST();
   if (BOT_START_DATE && today < BOT_START_DATE) return false;
@@ -45,12 +40,9 @@ function isWithinActivePeriod() {
   return true;
 }
 
-// 実際にチェックインを送ってよいか（手動ON/OFF ＋ 期間の両方を満たす必要がある）
 function isActiveNow() {
   return store.getEnabled() && isWithinActivePeriod();
 }
-
-// ===================== 1. OAuth: メンバーの許可導線 =====================
 
 app.get('/slack/oauth/start', (req, res) => {
   const params = new URLSearchParams({
@@ -116,8 +108,6 @@ app.get('/slack/oauth/callback', async (req, res) => {
   }
 });
 
-// ===================== 2. DM送信（チェックイン） =====================
-
 async function sendCheckinToAll(timeLabel) {
   const botToken = store.getBotToken();
   if (!botToken) {
@@ -150,6 +140,19 @@ async function sendCheckinToAll(timeLabel) {
               value: key,
             })),
           },
+          {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text:
+                  'Bot管理用リンク: ' +
+                  `<${BASE_URL}/admin/on?secret=${TRIGGER_SECRET}|起動(ON)> ｜ ` +
+                  `<${BASE_URL}/admin/off?secret=${TRIGGER_SECRET}|停止(OFF)> ｜ ` +
+                  `<${BASE_URL}/admin/status?secret=${TRIGGER_SECRET}|状態確認>`,
+              },
+            ],
+          },
         ],
       });
     } catch (err) {
@@ -158,9 +161,6 @@ async function sendCheckinToAll(timeLabel) {
   }
 }
 
-// 外部の無料cronサービス（例: cron-job.org）から叩いてもらうエンドポイント。
-// GET /trigger?secret=TRIGGER_SECRET&label=morning|evening
-// 手動OFF中、または起動期間外の場合はDMを送らずスキップする。
 app.get('/trigger', async (req, res) => {
   const { secret, label } = req.query;
   if (secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
@@ -175,7 +175,6 @@ app.get('/trigger', async (req, res) => {
   res.send('ok');
 });
 
-// サーバーを常時起動できる環境なら、内蔵cronでも良い（任意）。この場合もisActiveNow()でガードされる。
 if (ENABLE_INTERNAL_CRON === 'true') {
   cron.schedule(
     '0 10 * * *',
@@ -188,12 +187,6 @@ if (ENABLE_INTERNAL_CRON === 'true') {
     { timezone: 'Asia/Tokyo' }
   );
 }
-
-// ===================== 2.5 管理用: 手動ON/OFF・状態確認 =====================
-// ブラウザでURLを開くだけで切り替えられる。ブックマークしておくと便利。
-// GET /admin/on?secret=...   → Botを起動（DM送信を再開）
-// GET /admin/off?secret=...  → Botを停止（DM送信を止める）
-// GET /admin/status?secret=... → 現在の状態を確認
 
 app.get('/admin/on', (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
@@ -217,8 +210,6 @@ app.get('/admin/status', (req, res) => {
       `<p>実際に送信されるか: ${isActiveNow() ? '送信される' : '送信されない'}</p>`
   );
 });
-
-// ===================== 3. ボタン押下 → 本人のステータスを変更 =====================
 
 app.use('/slack/interactions', express.raw({ type: '*/*' }));
 
