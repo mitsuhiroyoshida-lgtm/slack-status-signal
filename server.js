@@ -17,10 +17,9 @@ const {
   ALLOWED_EMAILS = '',
   BOT_START_DATE = '',
   BOT_END_DATE = '',
+  SKIP_WEEKENDS_AND_HOLIDAYS = 'true',
 } = process.env;
 
-// 初回起動時だけ、環境変数ALLOWED_EMAILSの内容を許可リストの初期値として取り込む。
-// 以降はこの管理ページから追加した内容がそのまま使われる。
 const INITIAL_ALLOW_LIST = ALLOWED_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 store.seedAllowListIfEmpty(INITIAL_ALLOW_LIST);
 
@@ -43,8 +42,42 @@ function isWithinActivePeriod() {
   return true;
 }
 
-function isActiveNow() {
-  return store.getEnabled() && isWithinActivePeriod();
+function isWeekendJST() {
+  const jstNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' }));
+  const day = jstNow.getDay();
+  return day === 0 || day === 6;
+}
+
+let holidaysCache = null;
+let holidaysCacheDate = null;
+
+async function getHolidaysMap() {
+  const today = todayJST();
+  if (holidaysCache && holidaysCacheDate === today) return holidaysCache;
+  try {
+    const { data } = await axios.get('https://holidays-jp.github.io/api/v1/date.json', { timeout: 5000 });
+    holidaysCache = data;
+    holidaysCacheDate = today;
+    return data;
+  } catch (err) {
+    console.error('祝日データ取得失敗:', err.message);
+    return holidaysCache || {};
+  }
+}
+
+async function isHolidayTodayJST() {
+  const map = await getHolidaysMap();
+  return Boolean(map[todayJST()]);
+}
+
+async function isActiveNow() {
+  if (!store.getEnabled()) return false;
+  if (!isWithinActivePeriod()) return false;
+  if (SKIP_WEEKENDS_AND_HOLIDAYS === 'true') {
+    if (isWeekendJST()) return false;
+    if (await isHolidayTodayJST()) return false;
+  }
+  return true;
 }
 
 app.get('/slack/oauth/start', (req, res) => {
@@ -104,7 +137,7 @@ app.get('/slack/oauth/callback', async (req, res) => {
 
     store.upsertUser(userId, { userToken });
     return res.send(
-      '<h2>登録が完了しました 🎉</h2><p>Botが稼働中の期間、毎朝10時・夕方17時にDMが届きます。ボタンを押すとあなたのSlackステータスが自動で切り替わります。このタブは閉じて大丈夫です。</p>'
+      '<h2>登録が完了しました 🎉</h2><p>Botが稼働中の期間、平日の10時・17時にDMが届きます。ボタンを押すとあなたのSlackステータスが自動で切り替わります。このタブは閉じて大丈夫です。</p>'
     );
   } catch (err) {
     console.error(err);
@@ -170,9 +203,10 @@ app.get('/trigger', async (req, res) => {
   const { secret, label } = req.query;
   if (secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
 
-  if (!isActiveNow()) {
-    console.log(`スキップ: enabled=${store.getEnabled()} / 期間内=${isWithinActivePeriod()}`);
-    return res.send('skipped (Botは現在停止中、または起動期間外です)');
+  const active = await isActiveNow();
+  if (!active) {
+    console.log(`スキップ: enabled=${store.getEnabled()} / 期間内=${isWithinActivePeriod()} / 土日祝スキップ設定=${SKIP_WEEKENDS_AND_HOLIDAYS}`);
+    return res.send('skipped (Botは現在停止中、起動期間外、または土日祝日です)');
   }
 
   const timeLabel = label === 'evening' ? '17時' : '10時';
@@ -183,12 +217,12 @@ app.get('/trigger', async (req, res) => {
 if (ENABLE_INTERNAL_CRON === 'true') {
   cron.schedule(
     '0 10 * * *',
-    () => { if (isActiveNow()) sendCheckinToAll('10時'); },
+    async () => { if (await isActiveNow()) sendCheckinToAll('10時'); },
     { timezone: 'Asia/Tokyo' }
   );
   cron.schedule(
     '0 17 * * *',
-    () => { if (isActiveNow()) sendCheckinToAll('17時'); },
+    async () => { if (await isActiveNow()) sendCheckinToAll('17時'); },
     { timezone: 'Asia/Tokyo' }
   );
 }
@@ -196,7 +230,7 @@ if (ENABLE_INTERNAL_CRON === 'true') {
 app.get('/admin/on', (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
   store.setEnabled(true);
-  res.send('<h2>Botを起動しました ▶️</h2><p>次回の10時/17時のチェックインからDMが届きます（起動期間の設定がある場合はその範囲内に限ります）。</p>');
+  res.send('<h2>Botを起動しました ▶️</h2><p>次回の10時/17時のチェックインからDMが届きます（起動期間・土日祝日の設定がある場合はその範囲内に限ります）。</p>');
 });
 
 app.get('/admin/off', (req, res) => {
@@ -205,19 +239,21 @@ app.get('/admin/off', (req, res) => {
   res.send('<h2>Botを停止しました ⏸️</h2><p>再開するまでDMは送信されません。</p>');
 });
 
-app.get('/admin/status', (req, res) => {
+app.get('/admin/status', async (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
+  const weekend = isWeekendJST();
+  const holiday = SKIP_WEEKENDS_AND_HOLIDAYS === 'true' ? await isHolidayTodayJST() : false;
+  const active = await isActiveNow();
   res.send(
     `<h2>現在の状態</h2>` +
       `<p>手動ON/OFF: ${store.getEnabled() ? 'ON' : 'OFF'}</p>` +
       `<p>起動期間: ${BOT_START_DATE || '(指定なし)'} 〜 ${BOT_END_DATE || '(指定なし)'}</p>` +
-      `<p>今日(JST): ${todayJST()} / 期間内: ${isWithinActivePeriod() ? 'はい' : 'いいえ'}</p>` +
-      `<p>実際に送信されるか: ${isActiveNow() ? '送信される' : '送信されない'}</p>`
+      `<p>土日祝スキップ設定: ${SKIP_WEEKENDS_AND_HOLIDAYS === 'true' ? '有効' : '無効'}</p>` +
+      `<p>今日(JST): ${todayJST()} / 土日: ${weekend ? 'はい' : 'いいえ'} / 祝日: ${holiday ? 'はい' : 'いいえ'}</p>` +
+      `<p>期間内: ${isWithinActivePeriod() ? 'はい' : 'いいえ'}</p>` +
+      `<p>実際に送信されるか: ${active ? '送信される' : '送信されない'}</p>`
   );
 });
-
-// ===================== メンバー管理ページ =====================
-// GET /admin/members?secret=... で一覧表示。フォーム送信もGETで同じページに戻る。
 
 function renderMembersPage() {
   const allowList = store.getAllowList();
