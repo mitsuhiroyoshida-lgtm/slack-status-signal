@@ -21,6 +21,7 @@ const {
 } = process.env;
 
 const INITIAL_ALLOW_LIST = ALLOWED_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+// トップレベルawaitはCommonJSで使えないため、IIFEで実行する。
 (async () => {
   try {
     await store.seedAllowListIfEmpty(INITIAL_ALLOW_LIST);
@@ -35,6 +36,7 @@ const SIGNALS = {
   blue: { emoji: ':large_blue_circle:', label: '青（順調）', text: '順調に対応中' },
   yellow: { emoji: ':large_yellow_circle:', label: '黄（やや負荷あり）', text: 'やや負荷あり・急ぎは調整希望' },
   red: { emoji: ':red_circle:', label: '赤（高負荷）', text: '高負荷・緊急以外は後ほど対応' },
+  clear: { emoji: '', label: '解除（表示なし）', text: '' },
 };
 
 function todayJST() {
@@ -423,9 +425,13 @@ app.post('/slack/interactions', async (req, res) => {
     });
 
     if (payload.response_url) {
+      const confirmText =
+        key === 'clear'
+          ? 'ステータスを解除しました（表示なし）'
+          : `ステータスを更新しました: ${signal.emoji} ${signal.label}`;
       await axios.post(payload.response_url, {
         replace_original: true,
-        text: `ステータスを更新しました: ${signal.emoji} ${signal.label}`,
+        text: confirmText,
       });
     }
   } catch (err) {
