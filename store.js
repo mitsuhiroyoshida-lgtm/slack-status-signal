@@ -1,95 +1,102 @@
-// 超シンプルなファイルベースの保存先。
-// 小規模チーム内利用を想定（永続DBが要る規模になったらSQLite/Postgresに置き換えてください）
-const fs = require('fs');
-const path = require('path');
+// Upstash Redis(無料の外部データ保存サービス)を使った永続化。
+// Renderは再デプロイのたびにサーバーの中身が作り直されるため、
+// ローカルファイルに保存する方式だと情報が消えてしまう。それを防ぐための実装。
+const axios = require('axios');
 
-const DATA_DIR = path.join(__dirname, 'data');
-const FILE = path.join(DATA_DIR, 'tokens.json');
+const { UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN } = process.env;
+const KEY = 'slack-status-signal:data';
 
-function ensureFile() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(FILE)) {
-    fs.writeFileSync(FILE, JSON.stringify({ botToken: null, enabled: true, allowList: [], users: {} }, null, 2));
+const DEFAULT_DATA = { botToken: null, enabled: true, allowList: [], users: {} };
+
+async function redisCommand(command) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
+    throw new Error('UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN が設定されていません');
   }
+  const { data } = await axios.post(UPSTASH_REDIS_REST_URL, command, {
+    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+  });
+  return data.result;
 }
 
-function load() {
-  ensureFile();
-  const data = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-  if (typeof data.enabled !== 'boolean') data.enabled = true; // 古いdataファイルとの互換
-  if (!Array.isArray(data.allowList)) data.allowList = []; // 古いdataファイルとの互換
+async function load() {
+  const raw = await redisCommand(['GET', KEY]);
+  if (!raw) return { ...DEFAULT_DATA };
+  const data = JSON.parse(raw);
+  if (typeof data.enabled !== 'boolean') data.enabled = true;
+  if (!Array.isArray(data.allowList)) data.allowList = [];
+  if (!data.users) data.users = {};
   return data;
 }
 
-function save(data) {
-  ensureFile();
-  fs.writeFileSync(FILE, JSON.stringify(data, null, 2));
+async function save(data) {
+  await redisCommand(['SET', KEY, JSON.stringify(data)]);
 }
 
-function setBotToken(token) {
-  const data = load();
+async function setBotToken(token) {
+  const data = await load();
   data.botToken = token;
-  save(data);
+  await save(data);
 }
 
-function getBotToken() {
-  return load().botToken;
+async function getBotToken() {
+  const data = await load();
+  return data.botToken;
 }
 
-// 手動ON/OFF。trueならチェックイン送信対象、falseなら停止中。
-function setEnabled(enabled) {
-  const data = load();
+async function setEnabled(enabled) {
+  const data = await load();
   data.enabled = enabled;
-  save(data);
+  await save(data);
 }
 
-function getEnabled() {
-  return load().enabled;
+async function getEnabled() {
+  const data = await load();
+  return data.enabled;
 }
 
-// 登録を許可するメールアドレス一覧（小文字で保存）
-function getAllowList() {
-  return load().allowList;
+async function getAllowList() {
+  const data = await load();
+  return data.allowList;
 }
 
-function seedAllowListIfEmpty(emails) {
-  const data = load();
+async function seedAllowListIfEmpty(emails) {
+  const data = await load();
   if (data.allowList.length === 0 && emails.length > 0) {
     data.allowList = emails;
-    save(data);
+    await save(data);
   }
 }
 
-function addAllowedEmail(email) {
+async function addAllowedEmail(email) {
   const normalized = email.trim().toLowerCase();
-  const data = load();
+  const data = await load();
   if (!data.allowList.includes(normalized)) {
     data.allowList.push(normalized);
-    save(data);
+    await save(data);
   }
   return normalized;
 }
 
-function removeAllowedEmail(email) {
+async function removeAllowedEmail(email) {
   const normalized = email.trim().toLowerCase();
-  const data = load();
+  const data = await load();
   data.allowList = data.allowList.filter((e) => e !== normalized);
-  save(data);
+  await save(data);
 }
 
-// user: { userToken, userName, email }
-function upsertUser(userId, info) {
-  const data = load();
+async function upsertUser(userId, info) {
+  const data = await load();
   data.users[userId] = { ...(data.users[userId] || {}), ...info };
-  save(data);
+  await save(data);
 }
 
-function getUser(userId) {
-  return load().users[userId];
+async function getUser(userId) {
+  const data = await load();
+  return data.users[userId];
 }
 
-function getAllUsers() {
-  const data = load();
+async function getAllUsers() {
+  const data = await load();
   return Object.entries(data.users).map(([id, v]) => ({ id, ...v }));
 }
 
