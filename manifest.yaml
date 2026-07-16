@@ -1,0 +1,35 @@
+# Slack App Manifest
+# 使い方: https://api.slack.com/apps → "Create New App" → "From an app manifest" を選び、この内容を貼り付ける。
+# YOUR_HOST の部分は、実際にデプロイしたサーバーのURL（例: https://slack-status-signal.onrender.com）に置き換える。
+
+display_information:
+  name: 業務負荷シグナルBot
+  description: 朝10時・夕方17時にDMで負荷状況(青/黄/赤)を確認し、選ぶと本人のSlackステータス絵文字を自動更新します
+  background_color: "#2c2d30"
+
+features:
+  bot_user:
+    display_name: status-signal-bot
+    always_online: true
+
+oauth_config:
+  redirect_urls:
+    - https://YOUR_HOST/slack/oauth/callback
+  scopes:
+    # bot token: 全員へのDM送信に使用（アプリを最初にワークスペースへ入れた人が付与）
+    bot:
+      - chat:write
+      - im:write
+      - users:read
+      - users:read.email
+    # user token: 押した本人のステータスを変更するために、各メンバーが個別に許可する
+    user:
+      - users.profile:write
+
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://YOUR_HOST/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token

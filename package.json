@@ -1,0 +1,16 @@
+{
+  "name": "slack-status-signal",
+  "version": "1.0.0",
+  "description": "Slack DM checkin (10:00/17:00) that lets each member pick a Blue/Yellow/Red workload signal, which updates their own Slack status emoji automatically.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@slack/web-api": "^7.3.4",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3"
+  }
+}
