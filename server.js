@@ -18,7 +18,6 @@ const {
   BOT_START_DATE = '',
   BOT_END_DATE = '',
   SKIP_WEEKENDS_AND_HOLIDAYS = 'true',
-  RESEND_API_KEY = '',
 } = process.env;
 
 const INITIAL_ALLOW_LIST = ALLOWED_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
@@ -81,29 +80,38 @@ async function isActiveNow() {
   return true;
 }
 
-async function sendInviteEmail(toEmail, inviteUrl) {
-  if (!RESEND_API_KEY) {
-    return { sent: false, reason: 'RESEND_API_KEY未設定' };
+async function sendInviteViaSlackDM(email, inviteUrl) {
+  const botToken = store.getBotToken();
+  if (!botToken) {
+    return { sent: false, reason: 'botトークン未登録です。まず /slack/oauth/start から誰か1人が登録してください。' };
   }
   try {
-    await axios.post(
-      'https://api.resend.com/emails',
-      {
-        from: '業務負荷シグナルBot <onboarding@resend.dev>',
-        to: [toEmail],
-        subject: '業務負荷シグナルBotへのご招待',
-        html:
-          `<p>業務負荷シグナルBotに登録するご案内です。</p>` +
-          `<p>以下のリンクを開いて、Slackで「許可する」を押してください。</p>` +
-          `<p><a href="${inviteUrl}">${inviteUrl}</a></p>` +
-          `<p>登録すると、平日10時・17時にSlackのDMで負荷状況を聞かれ、選ぶとSlackステータスが自動で切り替わります。</p>`,
-      },
-      { headers: { Authorization: `Bearer ${RESEND_API_KEY}` } }
-    );
+    const client = new WebClient(botToken);
+    const lookup = await client.users.lookupByEmail({ email });
+    const userId = lookup.user.id;
+
+    const im = await client.conversations.open({ users: userId });
+    await client.chat.postMessage({
+      channel: im.channel.id,
+      text: '業務負荷シグナルBotへのご招待です。',
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text:
+              '業務負荷シグナルBotへのご招待です。\n' +
+              `以下のリンクを開いて、Slackで「許可する」を押してください。\n<${inviteUrl}|登録リンクを開く>\n\n` +
+              '登録すると、平日10時・17時にSlackのDMで負荷状況を聞かれ、選ぶとSlackステータスが自動で切り替わります。',
+          },
+        },
+      ],
+    });
     return { sent: true };
   } catch (err) {
-    console.error('招待メール送信失敗:', (err.response && err.response.data) || err.message);
-    return { sent: false, reason: (err.response && JSON.stringify(err.response.data)) || err.message };
+    const reason = (err.data && err.data.error) || err.message;
+    console.error('招待DM送信失敗:', reason);
+    return { sent: false, reason };
   }
 }
 
@@ -278,12 +286,11 @@ app.get('/admin/status', async (req, res) => {
       `<p>土日祝スキップ設定: ${SKIP_WEEKENDS_AND_HOLIDAYS === 'true' ? '有効' : '無効'}</p>` +
       `<p>今日(JST): ${todayJST()} / 土日: ${weekend ? 'はい' : 'いいえ'} / 祝日: ${holiday ? 'はい' : 'いいえ'}</p>` +
       `<p>期間内: ${isWithinActivePeriod() ? 'はい' : 'いいえ'}</p>` +
-      `<p>実際に送信されるか: ${active ? '送信される' : '送信されない'}</p>` +
-      `<p>招待メール自動送信: ${RESEND_API_KEY ? '有効' : '未設定'}</p>`
+      `<p>実際に送信されるか: ${active ? '送信される' : '送信されない'}</p>`
   );
 });
 
-function renderMembersPage(notice) {
+function renderMembersPage(notice, noticeDetail) {
   const allowList = store.getAllowList();
   const users = store.getAllUsers();
   const registeredEmails = new Set(users.map((u) => (u.email || '').toLowerCase()));
@@ -294,7 +301,7 @@ function renderMembersPage(notice) {
       const status = registered ? '✅ 登録済み' : '⏳ 招待中（未登録）';
       const removeLink = `/admin/remove-member?secret=${TRIGGER_SECRET}&email=${encodeURIComponent(email)}`;
       const resendLink = `/admin/add-member?secret=${TRIGGER_SECRET}&email=${encodeURIComponent(email)}`;
-      return `<tr><td>${email}</td><td>${status}</td><td><a href="${resendLink}">招待メール再送</a> | <a href="${removeLink}" onclick="return confirm('${email} を削除しますか？')">削除</a></td></tr>`;
+      return `<tr><td>${email}</td><td>${status}</td><td><a href="${resendLink}">招待DM再送</a> | <a href="${removeLink}" onclick="return confirm('${email} を削除しますか？')">削除</a></td></tr>`;
     })
     .join('');
 
@@ -302,26 +309,23 @@ function renderMembersPage(notice) {
 
   let noticeHtml = '';
   if (notice === 'sent') {
-    noticeHtml = '<p style="color:green;">✅ 招待メールを送信しました</p>';
+    noticeHtml = '<p style="color:green;">✅ Slack DMで招待を送信しました</p>';
   } else if (notice === 'failed') {
     noticeHtml =
-      '<p style="color:red;">⚠️ メンバーは追加しましたが、招待メールの送信に失敗しました（RESEND_API_KEYの設定をご確認ください）。上の登録用リンクを直接送ってください。</p>';
-  } else if (notice === 'not-configured') {
-    noticeHtml =
-      '<p style="color:#a60;">ℹ️ メンバーを追加しました。RESEND_API_KEYが未設定のため、招待メールは送信されていません。上の登録用リンクを直接送ってください。</p>';
+      `<p style="color:red;">⚠️ メンバーは追加しましたが、招待DMの送信に失敗しました（${noticeDetail || '原因不明'}）。上の登録用リンクを直接送ってください。</p>`;
   }
 
   return `
     <h2>メンバー管理</h2>
     ${noticeHtml}
     <p>ここで許可したメールアドレスの人だけが、下記の登録リンクを使ってBotに登録できます。</p>
-    <p>登録用リンク（招待メールが使えない場合はこちらを直接送ってください）:<br><code>${inviteUrl}</code></p>
+    <p>登録用リンク（DM送信に失敗した場合はこちらを直接送ってください）:<br><code>${inviteUrl}</code></p>
 
-    <h3>メンバーを追加（追加すると自動で招待メールが送られます）</h3>
+    <h3>メンバーを追加（追加すると自動でSlack DMが送られます）</h3>
     <form method="GET" action="/admin/add-member">
       <input type="hidden" name="secret" value="${TRIGGER_SECRET}" />
       <input type="email" name="email" placeholder="tanaka@example.com" required />
-      <button type="submit">追加して招待メールを送る</button>
+      <button type="submit">追加して招待DMを送る</button>
     </form>
 
     <h3>現在のメンバー一覧</h3>
@@ -334,7 +338,7 @@ function renderMembersPage(notice) {
 
 app.get('/admin/members', (req, res) => {
   if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
-  res.send(renderMembersPage(req.query.notice));
+  res.send(renderMembersPage(req.query.notice, req.query.detail));
 });
 
 app.get('/admin/add-member', async (req, res) => {
@@ -345,15 +349,11 @@ app.get('/admin/add-member', async (req, res) => {
   const normalized = store.addAllowedEmail(email);
   const inviteUrl = `${BASE_URL}/slack/oauth/start`;
 
-  let notice;
-  if (!RESEND_API_KEY) {
-    notice = 'not-configured';
-  } else {
-    const result = await sendInviteEmail(normalized, inviteUrl);
-    notice = result.sent ? 'sent' : 'failed';
-  }
+  const result = await sendInviteViaSlackDM(normalized, inviteUrl);
+  const notice = result.sent ? 'sent' : 'failed';
+  const detailParam = result.reason ? `&detail=${encodeURIComponent(result.reason)}` : '';
 
-  res.redirect(`/admin/members?secret=${TRIGGER_SECRET}&notice=${notice}`);
+  res.redirect(`/admin/members?secret=${TRIGGER_SECRET}&notice=${notice}${detailParam}`);
 });
 
 app.get('/admin/remove-member', (req, res) => {
