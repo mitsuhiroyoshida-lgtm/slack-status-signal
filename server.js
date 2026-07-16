@@ -19,7 +19,10 @@ const {
   BOT_END_DATE = '',
 } = process.env;
 
-const ALLOW_LIST = ALLOWED_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+// 初回起動時だけ、環境変数ALLOWED_EMAILSの内容を許可リストの初期値として取り込む。
+// 以降はこの管理ページから追加した内容がそのまま使われる。
+const INITIAL_ALLOW_LIST = ALLOWED_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+store.seedAllowListIfEmpty(INITIAL_ALLOW_LIST);
 
 const app = express();
 
@@ -85,12 +88,13 @@ app.get('/slack/oauth/callback', async (req, res) => {
       return res.status(400).send('ユーザートークンの取得に失敗しました');
     }
 
-    if (ALLOW_LIST.length > 0) {
+    const allowList = store.getAllowList();
+    if (allowList.length > 0) {
       const botToken = store.getBotToken();
       const botClient = new WebClient(botToken);
       const info = await botClient.users.info({ user: userId });
       const email = info.user && info.user.profile && info.user.profile.email;
-      if (!email || !ALLOW_LIST.includes(email.toLowerCase())) {
+      if (!email || !allowList.includes(email.toLowerCase())) {
         return res
           .status(403)
           .send('<h2>登録できませんでした</h2><p>このBotは指定されたメンバーのみ利用できます。心当たりがない場合は管理者にご確認ください。</p>');
@@ -149,7 +153,8 @@ async function sendCheckinToAll(timeLabel) {
                   'Bot管理用リンク: ' +
                   `<${BASE_URL}/admin/on?secret=${TRIGGER_SECRET}|起動(ON)> ｜ ` +
                   `<${BASE_URL}/admin/off?secret=${TRIGGER_SECRET}|停止(OFF)> ｜ ` +
-                  `<${BASE_URL}/admin/status?secret=${TRIGGER_SECRET}|状態確認>`,
+                  `<${BASE_URL}/admin/status?secret=${TRIGGER_SECRET}|状態確認> ｜ ` +
+                  `<${BASE_URL}/admin/members?secret=${TRIGGER_SECRET}|メンバー管理>`,
               },
             ],
           },
@@ -209,6 +214,66 @@ app.get('/admin/status', (req, res) => {
       `<p>今日(JST): ${todayJST()} / 期間内: ${isWithinActivePeriod() ? 'はい' : 'いいえ'}</p>` +
       `<p>実際に送信されるか: ${isActiveNow() ? '送信される' : '送信されない'}</p>`
   );
+});
+
+// ===================== メンバー管理ページ =====================
+// GET /admin/members?secret=... で一覧表示。フォーム送信もGETで同じページに戻る。
+
+function renderMembersPage() {
+  const allowList = store.getAllowList();
+  const users = store.getAllUsers();
+  const registeredEmails = new Set(users.map((u) => (u.email || '').toLowerCase()));
+
+  const rows = allowList
+    .map((email) => {
+      const registered = registeredEmails.has(email);
+      const status = registered ? '✅ 登録済み' : '⏳ 招待中（未登録）';
+      const removeLink = `/admin/remove-member?secret=${TRIGGER_SECRET}&email=${encodeURIComponent(email)}`;
+      return `<tr><td>${email}</td><td>${status}</td><td><a href="${removeLink}" onclick="return confirm('${email} を削除しますか？')">削除</a></td></tr>`;
+    })
+    .join('');
+
+  const inviteUrl = `${BASE_URL}/slack/oauth/start`;
+
+  return `
+    <h2>メンバー管理</h2>
+    <p>ここで許可したメールアドレスの人だけが、下記の登録リンクを使ってBotに登録できます。</p>
+    <p>登録用リンク（対象者に送ってください）:<br><code>${inviteUrl}</code></p>
+
+    <h3>メンバーを追加</h3>
+    <form method="GET" action="/admin/add-member">
+      <input type="hidden" name="secret" value="${TRIGGER_SECRET}" />
+      <input type="email" name="email" placeholder="tanaka@example.com" required />
+      <button type="submit">追加</button>
+    </form>
+
+    <h3>現在のメンバー一覧</h3>
+    <table border="1" cellpadding="6" cellspacing="0">
+      <tr><th>メールアドレス</th><th>状態</th><th></th></tr>
+      ${rows || '<tr><td colspan="3">まだ登録されていません</td></tr>'}
+    </table>
+  `;
+}
+
+app.get('/admin/members', (req, res) => {
+  if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
+  res.send(renderMembersPage());
+});
+
+app.get('/admin/add-member', (req, res) => {
+  if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
+  const { email } = req.query;
+  if (!email) return res.status(400).send('email がありません');
+  store.addAllowedEmail(email);
+  res.redirect(`/admin/members?secret=${TRIGGER_SECRET}`);
+});
+
+app.get('/admin/remove-member', (req, res) => {
+  if (req.query.secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
+  const { email } = req.query;
+  if (!email) return res.status(400).send('email がありません');
+  store.removeAllowedEmail(email);
+  res.redirect(`/admin/members?secret=${TRIGGER_SECRET}`);
 });
 
 app.use('/slack/interactions', express.raw({ type: '*/*' }));
