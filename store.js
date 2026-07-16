@@ -9,7 +9,7 @@ const FILE = path.join(DATA_DIR, 'tokens.json');
 function ensureFile() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(FILE)) {
-    fs.writeFileSync(FILE, JSON.stringify({ botToken: null, enabled: true, users: {} }, null, 2));
+    fs.writeFileSync(FILE, JSON.stringify({ botToken: null, enabled: true, allowList: [], users: {} }, null, 2));
   }
 }
 
@@ -17,6 +17,7 @@ function load() {
   ensureFile();
   const data = JSON.parse(fs.readFileSync(FILE, 'utf8'));
   if (typeof data.enabled !== 'boolean') data.enabled = true; // 古いdataファイルとの互換
+  if (!Array.isArray(data.allowList)) data.allowList = []; // 古いdataファイルとの互換
   return data;
 }
 
@@ -46,7 +47,37 @@ function getEnabled() {
   return load().enabled;
 }
 
-// user: { userToken, userName }
+// 登録を許可するメールアドレス一覧（小文字で保存）
+function getAllowList() {
+  return load().allowList;
+}
+
+function seedAllowListIfEmpty(emails) {
+  const data = load();
+  if (data.allowList.length === 0 && emails.length > 0) {
+    data.allowList = emails;
+    save(data);
+  }
+}
+
+function addAllowedEmail(email) {
+  const normalized = email.trim().toLowerCase();
+  const data = load();
+  if (!data.allowList.includes(normalized)) {
+    data.allowList.push(normalized);
+    save(data);
+  }
+  return normalized;
+}
+
+function removeAllowedEmail(email) {
+  const normalized = email.trim().toLowerCase();
+  const data = load();
+  data.allowList = data.allowList.filter((e) => e !== normalized);
+  save(data);
+}
+
+// user: { userToken, userName, email }
 function upsertUser(userId, info) {
   const data = load();
   data.users[userId] = { ...(data.users[userId] || {}), ...info };
@@ -67,6 +98,10 @@ module.exports = {
   getBotToken,
   setEnabled,
   getEnabled,
+  getAllowList,
+  seedAllowListIfEmpty,
+  addAllowedEmail,
+  removeAllowedEmail,
   upsertUser,
   getUser,
   getAllUsers,
