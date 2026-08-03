@@ -248,15 +248,22 @@ app.get('/trigger', async (req, res) => {
   const { secret, label } = req.query;
   if (secret !== TRIGGER_SECRET) return res.status(403).send('forbidden');
 
-  const active = await isActiveNow();
-  if (!active) {
-    console.log(`スキップ: 期間内=${isWithinActivePeriod()} / 土日祝スキップ設定=${SKIP_WEEKENDS_AND_HOLIDAYS}`);
-    return res.send('skipped (Botは現在停止中、起動期間外、または土日祝日です)');
-  }
+  try {
+    const active = await isActiveNow();
+    if (!active) {
+      console.log(`スキップ: 期間内=${isWithinActivePeriod()} / 土日祝スキップ設定=${SKIP_WEEKENDS_AND_HOLIDAYS}`);
+      return res.send('skipped (Botは現在停止中、起動期間外、または土日祝日です)');
+    }
 
-  const timeLabel = label === 'evening' ? '17時' : '10時';
-  await sendCheckinToAll(timeLabel);
-  res.send('ok');
+    const timeLabel = label === 'evening' ? '17時' : '10時';
+    await sendCheckinToAll(timeLabel);
+    res.send('ok');
+  } catch (err) {
+    // 外部cronサービスによっては巨大なエラーページを「失敗」として扱ってしまうため、
+    // レスポンスは短い文言のみ返し、詳細はRenderのログにだけ出力する。
+    console.error('/trigger 処理中にエラー:', err);
+    res.status(500).send('error: trigger failed (see server logs)');
+  }
 });
 
 if (ENABLE_INTERNAL_CRON === 'true') {
