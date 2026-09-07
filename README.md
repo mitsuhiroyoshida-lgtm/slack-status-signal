@@ -5,7 +5,7 @@
 1つのBotをホスティングすれば、チームメンバーは各自ブラウザで1回リンクを開いて許可するだけで使えます。
 
 > このREADMEは、コード（このリポジトリ）を保守・設定する管理者向けのドキュメントです。
-> 登録メンバー向けの使い方説明は `guide/guide.docx`（利用ガイド）を参照・配布してください。
+> 登録メンバー向けの使い方説明（利用ガイド）は必要に応じて別途作成・配布してください（リポジトリには同梱していません）。
 
 ## 仕組み
 
@@ -44,10 +44,12 @@ Render等の無料ホスティングは再デプロイのたびにファイル�
 1. このフォルダをGitHubリポジトリにpush
 2. https://render.com → **New** → **Web Service** → リポジトリを選択
 3. Build Command: `npm install` / Start Command: `npm start`
-4. Environment変数に `.env.example` の内容を設定
+4. Environment変数に `.env.example` の内容を設定（**必須項目が1つでも欠けると動きません**）
    - `BASE_URL` はRenderが払い出すURL（例 `https://slack-status-signal.onrender.com`）
-   - `TRIGGER_SECRET` は適当な長いランダム文字列
+   - `TRIGGER_SECRET` は適当な長いランダム文字列（`openssl rand -hex 24` などで生成）
    - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` は上記で取得した値
+   - `ADMIN_EMAILS` に管理者（自分）のメールアドレス
+   - 必須項目が欠けている場合、起動ログの先頭に `■ 起動に必要な環境変数が未設定です: ...` と出ます
 5. デプロイ後、Slack Appの設定に戻り以下を更新
    - **OAuth & Permissions** → Redirect URLs → `https://あなたのURL/slack/oauth/callback`
    - **Interactivity & Shortcuts** → Request URL → `https://あなたのURL/slack/interactions`
@@ -66,6 +68,11 @@ https://cron-job.org/ （無料）などの外部cronサービスで、以下2�
 - 夕方17:00: `https://あなたのURL/trigger?secret=あなたのTRIGGER_SECRET&label=evening`
 
 タイムゾーンをAsia/Tokyoに設定してください。
+
+同じ日・同じ時間帯（morning / evening）のDMは**1回しか送られません**。
+Renderの無料プランはスリープからの復帰に時間がかかり、cronサービスがタイムアウトして再試行することがあるため、
+その場合でもメンバーに二重にDMが届かないようになっています。
+手動でもう一度送りたいときは、URLの末尾に `&force=1` を付けてください。
 
 ## メンバーへの展開方法（自分＋指定した人だけに限定）
 
@@ -88,6 +95,8 @@ https://あなたのURL/admin/members?secret=あなたのTRIGGER_SECRET
 相手が登録リンクを開いて「許可する」を押せば登録完了。次の10時 or 17時のDMからボタンが届きます。
 `ALLOWED_EMAILS` に載っていないメールアドレスの人がリンクを開いた場合は「登録できませんでした」と表示され、登録されません。
 不要になったメンバーは同じ画面の「削除」リンクから外せます。
+削除すると、許可リストから消えるだけでなく**登録情報（保存されていたユーザートークン）も一緒に削除**され、
+以降そのメンバーにDMは届きません。
 
 ## ある期間だけBotを動かす／手動でON・OFFする
 
@@ -116,7 +125,18 @@ BOT_END_DATE=2026-08-15
 実際にDMが送られるのは「①の期間内」かつ「②がON」の両方を満たしたときだけです。
 たとえば期間指定はせずに②だけ使えば、繁忙期が始まったら`/admin/on`を開いて起動し、終わったら`/admin/off`で止める、という運用もできます。
 
-これら4つのリンクは、毎回のチェックインDM本文にも「Bot管理用リンク」として表示されます（全登録メンバーから見える点に注意してください）。
+これらのリンクは `TRIGGER_SECRET` を含むため、`ADMIN_EMAILS` に指定した管理者のDMにだけ「Bot管理用リンク」として表示されます。
+一般メンバーのDMには表示されません。`ADMIN_EMAILS` を空にすれば、誰のDMにも表示されなくなります。
+管理用URLはサーバーの起動ログにも出力されるので（Renderのログは管理者しか見られません）、そこからブックマークしておくのが確実です。
+
+### 設定できたかを確認する（テスト送信）
+
+```
+https://あなたのURL/admin/test?secret=あなたのTRIGGER_SECRET
+```
+
+起動期間・土日祝・二重送信防止をすべて無視して、`ADMIN_EMAILS` に指定した管理者にだけチェックインDMを送ります。
+ボタンを押してステータスが変われば、Slack App側の設定（Interactivity のURL・スコープ）まで含めて正常です。
 
 ## 土日祝日の自動スキップ
 
@@ -126,6 +146,10 @@ BOT_END_DATE=2026-08-15
 ```
 SKIP_WEEKENDS_AND_HOLIDAYS=true
 ```
+
+祝日は外部API（holidays-jp）から取得し、取得できた内容はUpstash Redisにも保存します。
+APIが一時的に落ちていても、保存済みのデータで判定を続けます。
+保存データも無く判定できない場合の挙動は `HOLIDAY_UNKNOWN_MODE` で選べます（`send`=平日として送信／`skip`=念のため送らない）。
 
 ## ステータスの絵文字・文言を変える
 
@@ -148,11 +172,12 @@ const SIGNALS = {
 - `store.js` … データ保存（Upstash Redis経由。許可リスト・トークン・ON/OFF状態を永続化）
 - `manifest.yaml` … Slack App作成用マニフェスト
 - `.env.example` … 必要な環境変数一覧
-- `guide/guide.docx` … 登録メンバー向けの利用ガイド（配布用）
+- `.gitignore` … `.env`（秘密情報）や `node_modules` を誤ってコミットしないための設定
 
 ## 注意点・制限
 
 - データはUpstash Redis（無料枠）に保存しています。無料枠の上限を超える規模で使う場合はプラン変更を検討してください。
 - 「一定期間だけ負荷がかかる」用途とのことなので、不要になったら「メンバー管理」画面から該当メンバーを削除するか、Bot自体を停止すればOKです。
 - Slackの `users.profile:write` はユーザー本人の許可があって初めて使えるスコープです。管理者権限で他人のステータスを強制変更することはできません（意図的な仕様です）。
-- チェックインDMの「Bot管理用リンク」は全登録メンバーに見える形で表示されます。ON/OFFやメンバー管理は基本的に管理者だけが操作する運用にしてください。
+- チェックインDMの「Bot管理用リンク」は `ADMIN_EMAILS` に指定した管理者にだけ表示されます。管理用URLには `TRIGGER_SECRET` が含まれるため、他の人に転送しないでください。
+- Upstash Redisに一時的に接続できない場合、管理画面は500エラーを返しますが、サーバー自体は落ちません（復旧すればそのまま使えます）。

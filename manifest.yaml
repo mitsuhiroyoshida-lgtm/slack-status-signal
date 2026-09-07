@@ -32,4 +32,4 @@ settings:
     request_url: https://YOUR_HOST/slack/interactions
   org_deploy_enabled: false
   socket_mode_enabled: false
-  token
+  token_rotation_enabled: false
