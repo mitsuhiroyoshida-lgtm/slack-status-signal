@@ -430,16 +430,115 @@ if (ENABLE_INTERNAL_CRON === 'true') {
   console.log('内蔵cronを有効化しました（10:00 / 17:00 JST）');
 }
 
+// URLを開いただけでON/OFFが切り替わらないよう、確認ボタン(POST)を1枚挟む。
+// Slackのリンクプレビューやブラウザの先読み、誤クリックで停止する事故を防ぐため。
+// 誰が/何がアクセスしたかを追えるよう、User-Agentもログに残す。
+function logAdminAccess(req, label) {
+  const ua = req.headers['user-agent'] || '(User-Agentなし)';
+  const ip = req.headers['x-forwarded-for'] || req.ip || '(不明)';
+  console.log(`[管理操作] ${label} method=${req.method} ip=${ip} ua="${ua}"`);
+}
+
+function renderConfirmPage({ title, message, actionPath, buttonLabel, buttonColor }) {
+  const secretParam = encodeURIComponent(TRIGGER_SECRET || '');
+  return `<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+       max-width:32rem;margin:0 auto;padding:2rem 1.25rem;line-height:1.7;color:#1a1a1a}
+  h2{font-size:1.35rem;margin:0 0 .75rem}
+  p{margin:0 0 1.25rem;color:#444}
+  button{font-size:1.05rem;font-weight:600;color:#fff;background:${buttonColor};
+         border:0;border-radius:.5rem;padding:.85rem 1.75rem;cursor:pointer}
+  button:hover{opacity:.88}
+  .links{margin-top:2rem;font-size:.9rem}
+  .links a{color:#0b62d0;margin-right:1rem}
+</style></head><body>
+<h2>${escapeHtml(title)}</h2>
+<p>${message}</p>
+<form method="POST" action="${escapeHtml(actionPath)}?secret=${secretParam}">
+  <button type="submit">${escapeHtml(buttonLabel)}</button>
+</form>
+<div class="links">
+  <a href="/admin/status?secret=${secretParam}">状態確認</a>
+  <a href="/admin/members?secret=${secretParam}">メンバー管理</a>
+</div>
+</body></html>`;
+}
+
+function renderResultPage(title, message) {
+  const secretParam = encodeURIComponent(TRIGGER_SECRET || '');
+  return `<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+       max-width:32rem;margin:0 auto;padding:2rem 1.25rem;line-height:1.7;color:#1a1a1a}
+  h2{font-size:1.35rem;margin:0 0 .75rem}
+  p{margin:0 0 1.25rem;color:#444}
+  .links{margin-top:2rem;font-size:.9rem}
+  .links a{color:#0b62d0;margin-right:1rem}
+</style></head><body>
+<h2>${escapeHtml(title)}</h2>
+<p>${message}</p>
+<div class="links">
+  <a href="/admin/status?secret=${secretParam}">状態確認</a>
+  <a href="/admin/members?secret=${secretParam}">メンバー管理</a>
+</div>
+</body></html>`;
+}
+
+// GET = 確認画面を出すだけ（何も変更しない）
 app.get('/admin/on', wrap(async (req, res) => {
   if (!checkSecret(req, res)) return;
+  logAdminAccess(req, '起動(ON)の確認画面を表示');
+  const enabled = await store.getEnabled();
+  if (enabled) {
+    return res.send(renderResultPage('すでに起動中です ▶️', 'Botは現在ONです。操作は不要です。'));
+  }
+  res.send(
+    renderConfirmPage({
+      title: 'Botを起動しますか？',
+      message: '起動すると、次回の10時／17時のチェックインからDMが届きます（起動期間・土日祝日の設定がある場合はその範囲内に限ります）。',
+      actionPath: '/admin/on',
+      buttonLabel: '起動する',
+      buttonColor: '#1a7f37',
+    })
+  );
+}));
+
+// POST = 実際に切り替える
+app.post('/admin/on', wrap(async (req, res) => {
+  if (!checkSecret(req, res)) return;
+  logAdminAccess(req, '起動(ON)を実行');
   await store.setEnabled(true);
-  res.send('<h2>Botを起動しました ▶️</h2><p>次回の10時/17時のチェックインからDMが届きます（起動期間・土日祝日の設定がある場合はその範囲内に限ります）。</p>');
+  res.send(renderResultPage('Botを起動しました ▶️', '次回の10時／17時のチェックインからDMが届きます。'));
 }));
 
 app.get('/admin/off', wrap(async (req, res) => {
   if (!checkSecret(req, res)) return;
+  logAdminAccess(req, '停止(OFF)の確認画面を表示');
+  const enabled = await store.getEnabled();
+  if (!enabled) {
+    return res.send(renderResultPage('すでに停止中です ⏸️', 'Botは現在OFFです。操作は不要です。'));
+  }
+  res.send(
+    renderConfirmPage({
+      title: 'Botを停止しますか？',
+      message: '停止すると、再開するまで<strong>登録メンバー全員にDMが届かなくなります</strong>。繁忙期が終わったときなどにご利用ください。',
+      actionPath: '/admin/off',
+      buttonLabel: '停止する',
+      buttonColor: '#b42318',
+    })
+  );
+}));
+
+app.post('/admin/off', wrap(async (req, res) => {
+  if (!checkSecret(req, res)) return;
+  logAdminAccess(req, '停止(OFF)を実行');
   await store.setEnabled(false);
-  res.send('<h2>Botを停止しました ⏸️</h2><p>再開するまでDMは送信されません。</p>');
+  res.send(renderResultPage('Botを停止しました ⏸️', '再開するまでDMは送信されません。再開は「起動(ON)」のリンクから行えます。'));
 }));
 
 app.get('/admin/status', wrap(async (req, res) => {
